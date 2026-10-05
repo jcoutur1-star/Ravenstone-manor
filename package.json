@@ -1,0 +1,16 @@
+{
+  "name": "ravenstone-manor",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "netlify dev",
+    "deploy": "netlify deploy --prod"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "^2.57.0"
+  },
+  "devDependencies": {
+    "netlify-cli": "^23.0.0"
+  }
+}

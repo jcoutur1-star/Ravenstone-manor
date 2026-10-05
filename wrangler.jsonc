@@ -1,0 +1,12 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "ravenstone-manor",
+  "main": "site-worker.js",
+  "compatibility_date": "2026-09-15",
+  "assets": {
+    "directory": ".",
+    "binding": "ASSETS",
+    "not_found_handling": "single-page-application"
+  },
+  "d1_databases": []
+}

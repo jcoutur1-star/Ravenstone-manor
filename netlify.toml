@@ -1,0 +1,69 @@
+[build]
+  publish = "."
+  functions = "netlify/functions"
+
+[[redirects]]
+  from = "/"
+  to = "/play.html"
+  status = 200
+  force = true
+
+[[redirects]]
+  from = "/index.html"
+  to = "/play.html"
+  status = 301
+  force = true
+
+[[redirects]]
+  from = "/netlify/functions/*"
+  to = "/missing-source-file"
+  status = 404
+  force = true
+
+[[redirects]]
+  from = "/site-worker.js"
+  to = "/missing-source-file"
+  status = 404
+  force = true
+
+[[redirects]]
+  from = "/worker.js"
+  to = "/missing-source-file"
+  status = 404
+  force = true
+
+[[redirects]]
+  from = "/wrangler.jsonc"
+  to = "/missing-source-file"
+  status = 404
+  force = true
+
+[[redirects]]
+  from = "/.openai/*"
+  to = "/missing-source-file"
+  status = 404
+  force = true
+
+[[redirects]]
+  from = "/supabase/*"
+  to = "/missing-source-file"
+  status = 404
+  force = true
+
+[[redirects]]
+  from = "/README.md"
+  to = "/missing-source-file"
+  status = 404
+  force = true
+
+[[redirects]]
+  from = "/package.json"
+  to = "/missing-source-file"
+  status = 404
+  force = true
+
+[[redirects]]
+  from = "/.env*"
+  to = "/missing-source-file"
+  status = 404
+  force = true
