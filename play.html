@@ -82,23 +82,20 @@ action = async function(type, more = {}) {
   }
 };
 
-function addGameplayTools(savedTarget, savedDraft, restoreFocus, caret, savedTamperClue, savedTamperTarget) {
+function addGameplayTools(savedTarget, savedDraft, restoreFocus, caret, savedTamperClue, savedTamperTarget, savedGroupDraft) {
   if (!game || !['investigation', 'voting'].includes(game.status)) return;
 
   document.querySelectorAll('select[data-share]').forEach(function(select) {
     select.onchange = null;
-    if (select.options.length) select.options[0].textContent = 'Choose a guest to receive this clue';
     const button = document.createElement('button');
     button.type = 'button';
     button.className = 'btn secondary';
-    button.textContent = 'Share privately';
-    button.disabled = select.disabled || !select.value;
-    select.addEventListener('change', function() { button.disabled = select.disabled || !select.value; });
+    button.textContent = 'Share with group';
+    button.disabled = game.me.shareCount >= 2 || (game.me.sharedClueIds || []).includes(select.dataset.share);
     button.addEventListener('click', function() {
-      if (!select.value) return toast('Choose a guest first.');
-      action('share', { clueId: select.dataset.share, target: select.value });
+      action('share', { clueId: select.dataset.share });
     });
-    select.parentElement.appendChild(button);
+    select.replaceWith(button);
   });
 
   if (game.me.role === 'murderer') {
@@ -107,24 +104,24 @@ function addGameplayTools(savedTarget, savedDraft, restoreFocus, caret, savedTam
       const panel = document.createElement('div');
       panel.className = 'evidence';
       const label = document.createElement('small');
-      label.textContent = 'MURDERER ACTION · ONCE PER ROUND';
+      label.textContent = 'MURDERER ACTION · TWO ALTERATIONS';
       const title = document.createElement('h3');
       title.className = 'title';
       title.textContent = 'Tamper with a clue';
       const note = document.createElement('p');
       note.className = 'note';
-      note.textContent = 'Change one clue in your hand to implicate another guest. You can use this once; share the altered clue to plant it.';
+      note.textContent = 'Use two different starting clues: alter one to clear yourself, then alter another to frame a guest. Both altered clues can be shared with the group.';
       const clueField = document.createElement('div');
       clueField.className = 'field';
       const clueLabel = document.createElement('label');
-      clueLabel.textContent = 'Choose one of your clues';
+      clueLabel.textContent = 'Choose an unused starting clue';
       const clueSelect = document.createElement('select');
       clueSelect.id = 'tamperClue';
       const firstClue = document.createElement('option');
       firstClue.value = '';
       firstClue.textContent = 'Select a clue';
       clueSelect.appendChild(firstClue);
-      game.me.clues.filter(function(c) { return !c.sharedBy && !c.inspection?.tampered; }).forEach(function(c) {
+      (game.me.startingClues || game.me.clues.filter(function(c) { return !c.sharedBy; })).filter(function(c) { return !(game.me.tamperedClues || []).includes(c.id); }).forEach(function(c) {
         const option = document.createElement('option');
         option.value = c.id;
         option.textContent = c.category + ' — ' + c.text;
@@ -150,21 +147,75 @@ function addGameplayTools(savedTarget, savedDraft, restoreFocus, caret, savedTam
       });
       if (savedTamperTarget && Array.from(targetSelect.options).some(function(o) { return o.value === savedTamperTarget; })) targetSelect.value = savedTamperTarget;
       targetField.append(targetLabel, targetSelect);
-      const tamperButton = document.createElement('button');
-      tamperButton.type = 'button';
-      tamperButton.id = 'tamperButton';
-      tamperButton.className = 'btn primary';
-      tamperButton.textContent = game.me.tamperUsed ? 'You have used your tamper' : 'Alter selected clue';
-      tamperButton.disabled = Boolean(game.me.tamperUsed) || game.status !== 'investigation';
-      tamperButton.addEventListener('click', function() {
-        if (!clueSelect.value || !targetSelect.value) return toast('Choose a clue and a guest first.');
-        action('tamper', { clueId: clueSelect.value, target: targetSelect.value });
+      const selfButton = document.createElement('button');
+      selfButton.type = 'button'; selfButton.id = 'tamperSelfButton'; selfButton.className = 'btn secondary';
+      selfButton.textContent = game.me.tamperSelfUsed ? 'Self-clear used' : 'Alter clue to clear me';
+      selfButton.disabled = Boolean(game.me.tamperSelfUsed) || game.status !== 'investigation';
+      selfButton.addEventListener('click', function() {
+        if (!clueSelect.value) return toast('Choose a starting clue first.');
+        action('tamper', { mode: 'self', clueId: clueSelect.value });
       });
-      panel.append(label, title, note, clueField, targetField, tamperButton);
+      const frameButton = document.createElement('button');
+      frameButton.type = 'button'; frameButton.id = 'tamperFrameButton'; frameButton.className = 'btn primary';
+      frameButton.textContent = game.me.tamperFrameUsed ? 'Frame used' : 'Alter clue to frame guest';
+      frameButton.disabled = Boolean(game.me.tamperFrameUsed) || game.status !== 'investigation';
+      frameButton.addEventListener('click', function() {
+        if (!clueSelect.value || !targetSelect.value) return toast('Choose a clue and a guest first.');
+        action('tamper', { mode: 'frame', clueId: clueSelect.value, target: targetSelect.value });
+      });
+      panel.append(label, title, note, clueField, selfButton, targetField, frameButton);
       const firstEvidence = evidenceCard.querySelector('[data-inspect]')?.closest('.evidence');
       evidenceCard.insertBefore(panel, firstEvidence || null);
     }
   }
+
+  const evidenceCard = document.querySelector('.tabs + div .two .card') || document.querySelector('.two .card');
+  if (evidenceCard) {
+    const clueNodes = Array.from(evidenceCard.querySelectorAll('[data-inspect]')).map(function(button) { return button.closest('.evidence'); }).filter(Boolean);
+    const startingIds = new Set((game.me.startingClues || []).map(function(c) { return c.id; }));
+    const starting = document.createElement('div'); starting.className = 'evidence-stack'; starting.style.cssText = 'border-left:2px solid var(--purple);padding-left:12px;margin-top:12px';
+    const received = document.createElement('div'); received.className = 'evidence-stack'; received.style.cssText = 'border-left:2px solid var(--gold);padding-left:12px;margin-top:18px';
+    const startingTitle = document.createElement('h3'); startingTitle.className = 'title'; startingTitle.textContent = 'Your four starting clues';
+    const receivedTitle = document.createElement('h3'); receivedTitle.className = 'title'; receivedTitle.style.marginTop = '20px'; receivedTitle.textContent = 'Clues shared with you';
+    starting.appendChild(startingTitle); received.appendChild(receivedTitle);
+    let receivedCount = 0;
+    clueNodes.forEach(function(node) {
+      const inspect = node.querySelector('[data-inspect]');
+      if (inspect && startingIds.has(inspect.dataset.inspect)) starting.appendChild(node);
+      else { received.appendChild(node); receivedCount++; }
+    });
+    receivedTitle.textContent = 'Clues shared with you (' + receivedCount + ')';
+    if (!receivedCount) { const empty = document.createElement('p'); empty.className = 'note'; empty.textContent = 'No other guest has shared a clue yet.'; received.appendChild(empty); }
+    evidenceCard.append(starting, received);
+  }
+
+  const group = document.createElement('section');
+  group.className = 'card'; group.id = 'groupChat'; group.style.marginTop = '18px';
+  const groupTitle = document.createElement('h2'); groupTitle.className = 'title'; groupTitle.textContent = 'Group chat and shared evidence';
+  const groupNote = document.createElement('p'); groupNote.className = 'note'; groupNote.textContent = 'Messages and shared clues are visible to everyone in the manor, including bots. Each guest can share two clues.';
+  const feed = document.createElement('div'); feed.id = 'groupChatFeed'; feed.style.cssText = 'max-height:320px;overflow-y:auto;display:grid;gap:8px';
+  (game.groupChat || []).slice(-100).forEach(function(item) {
+    const entry = document.createElement('div'); entry.className = 'evidence';
+    const author = document.createElement('small'); author.textContent = item.fromName || (game.players.find(function(p) { return p.id === item.from; })?.name || 'Guest');
+    const content = document.createElement('div');
+    if (item.kind === 'clue' && item.clue) {
+      const category = document.createElement('strong'); category.textContent = item.clue.category + ' · ';
+      content.append(category, document.createTextNode(item.clue.text));
+    } else content.textContent = item.text || '';
+    entry.append(author, content); feed.appendChild(entry);
+  });
+  if (!feed.childElementCount) { const empty = document.createElement('p'); empty.className = 'note'; empty.textContent = 'The group chat is ready. Share a clue or start the discussion.'; feed.appendChild(empty); }
+  const groupCompose = document.createElement('div'); groupCompose.className = 'field';
+  const groupInput = document.createElement('textarea'); groupInput.id = 'groupChatDraft'; groupInput.rows = 2; groupInput.maxLength = 500; groupInput.placeholder = 'Write a message to everyone…'; groupInput.value = savedGroupDraft;
+  const groupSend = document.createElement('button'); groupSend.type = 'button'; groupSend.className = 'btn secondary'; groupSend.textContent = 'Send to group';
+  async function sendToGroup() {
+    const text = groupInput.value.trim(); if (!text) return toast('Write a message first.');
+    const result = await action('groupMessage', { text });
+    if (result && document.getElementById('groupChatDraft')) document.getElementById('groupChatDraft').value = '';
+  }
+  groupSend.addEventListener('click', sendToGroup);
+  groupInput.addEventListener('keydown', function(event) { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); sendToGroup(); } });
+  groupCompose.append(groupInput, groupSend); group.append(groupTitle, groupNote, feed, groupCompose); app.appendChild(group);
 
   const chat = document.createElement('section');
   chat.className = 'card';
@@ -297,18 +348,20 @@ const originalRender = render;
 render = function() {
   const oldTarget = document.getElementById('privateChatTarget');
   const oldDraft = document.getElementById('privateChatDraft');
+  const oldGroupDraft = document.getElementById('groupChatDraft');
   const oldTamperClue = document.getElementById('tamperClue');
   const oldTamperTarget = document.getElementById('tamperTarget');
   const restoreFocus = document.activeElement && document.activeElement.id === 'privateChatDraft';
   const caret = oldDraft && typeof oldDraft.selectionStart === 'number' ? oldDraft.selectionStart : 0;
   const savedTarget = oldTarget ? oldTarget.value : '';
   const savedDraft = oldDraft ? oldDraft.value : '';
+  const savedGroupDraft = oldGroupDraft ? oldGroupDraft.value : '';
   const savedTamperClue = oldTamperClue ? oldTamperClue.value : '';
   const savedTamperTarget = oldTamperTarget ? oldTamperTarget.value : '';
   originalRender();
   const evidenceNote = document.querySelector('.two .card .note');
-  if (evidenceNote && game && game.me) evidenceNote.textContent = roleText(game.me.role) + ' · Your four clues concern other guests. Share up to two directly.';
-  addGameplayTools(savedTarget, savedDraft, restoreFocus, caret, savedTamperClue, savedTamperTarget);
+  if (evidenceNote && game && game.me) evidenceNote.textContent = roleText(game.me.role) + ' · Your four starting clues concern other guests. Share two with everyone (' + game.me.shareCount + '/2 used).';
+  addGameplayTools(savedTarget, savedDraft, restoreFocus, caret, savedTamperClue, savedTamperTarget, savedGroupDraft);
 };
 </script>
 <script type="module">
