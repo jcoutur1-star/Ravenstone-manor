@@ -23,7 +23,8 @@ function enter(s){saveSession(s);selectedVote='';tab='evidence';renderLobby(s.pl
 function closeSync(){clearInterval(poll);if(socket){socket.close();socket=null}}
 async function connect(){closeSync();if(window.ravenstoneConnect){try{await window.ravenstoneConnect(session.code)}catch{}}poll=setInterval(refreshState,5000)}
 window.addEventListener('ravenstone-realtime-ready',()=>{if(session)connect()});
-async function refreshState(){if(!session)return;try{game=await api(`/api/rooms/${session.code}/state`);render()}catch(e){if(!$('#error'))toast(e.message)}}
+let refreshRequest=0;
+async function refreshState(){if(!session)return;const requestId=++refreshRequest;try{const latest=await api(`/api/rooms/${session.code}/state`);if(!session||requestId!==refreshRequest)return;game=latest;render()}catch(e){if(requestId===refreshRequest&&!$('#error'))toast(e.message)}}
 async function action(type,more={}){try{await api(`/api/rooms/${session.code}/action`,{type,...more});window.ravenstoneNotify?.(session.code);await refreshState()}catch(e){toast(e.message)}}
 function renderLobby(players){const bots=players.filter(p=>p.bot);app.innerHTML=`<div class="bar"><div>ROOM CODE <span class="code">${esc(session.code)}</span> <button class="btn quiet" id="copy">Copy</button></div><span class="pill">${session.mode==='practice'?'BOT PRACTICE':session.host?'HOST':'GUEST'}</span></div><div class="lobby"><section class="card"><h2 class="title">The guests</h2><p class="note">Share the room code with your party. The host can begin once at least three human guests have joined.</p><div id="guests" class="list"></div><div style="height:16px"></div><button class="btn primary" id="begin" ${session.mode==='practice'?'':'disabled'}>Begin investigation</button><button class="btn quiet" id="leave" style="margin-left:8px">Leave room</button><div id="error" class="err" style="margin-top:10px"></div></section><section class="card"><h2 class="title">The case</h2><p class="note">Every guest receives four private clues. Compare what you have, mark each suspect, and inspect one clue for tampering.</p><p class="note">Two players may call for an early vote. Any two players may postpone it to continue investigating; the ten-minute limit still applies.</p>${session.mode==='practice'?'<p class="note" style="color:var(--gold)">Practice room: three bot guests are ready. Your selected role stays secret until the case starts.</p>':''}</section></div>`;
 const draw=ps=>{const guestList=document.getElementById('guests');if(guestList)guestList.innerHTML=ps.map(p=>`<div class="guest"><span>${esc(p.name)}${p.id===session.playerId?' <span class="note">(you)</span>':''}${p.bot?' <span class="note">· bot</span>':''}</span><span>${p.host?'Host':'Guest'}</span></div>`).join('');const start=document.getElementById('begin');if(start){start.disabled=!(session.mode==='practice'||session.host&&ps.filter(p=>!p.bot).length>=3);start.textContent=session.mode==='practice'?'Begin bot investigation':'Begin investigation'}};window.renderLobby=draw;draw(players);
@@ -36,6 +37,44 @@ function $$(s){return [...document.querySelectorAll(s)]}loadSession();if(session
 </script>
 <script>
 /* Gameplay enhancements: immediate entry, explicit clue sharing, murderer tampering, and private DMs. */
+const baseLanding = landing;
+function addPerspectiveTutorials() {
+  const appRoot = document.getElementById('app');
+  if (!appRoot || !appRoot.querySelector('.join-grid') || document.getElementById('perspectiveTutorials')) return;
+  if (!document.getElementById('tutorialStyles')) {
+    const style = document.createElement('style'); style.id = 'tutorialStyles';
+    style.textContent = '.tutorial-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:15px;margin-top:15px}.tutorial-grid ol{margin:12px 0 0;padding-left:21px;color:var(--muted);font-size:13px;line-height:1.7}.tutorial-grid li{padding-left:3px;margin:8px 0}.tutorial-grid .murderer-guide{border-top:3px solid var(--red)}.tutorial-grid .guest-guide{border-top:3px solid var(--green)}@media(max-width:700px){.tutorial-grid{grid-template-columns:1fr}}';
+    document.head.appendChild(style);
+  }
+  const grid = document.createElement('div'); grid.id = 'perspectiveTutorials'; grid.className = 'tutorial-grid';
+  function makeGuide(title, description, steps, accent) {
+    const card = document.createElement('section'); card.className = 'card ' + accent;
+    const heading = document.createElement('h2'); heading.className = 'title'; heading.textContent = title;
+    const intro = document.createElement('p'); intro.className = 'note'; intro.textContent = description;
+    const list = document.createElement('ol');
+    steps.forEach(function(step) { const item = document.createElement('li'); item.textContent = step; list.appendChild(item); });
+    card.append(heading, intro, list); return card;
+  }
+  grid.append(
+    makeGuide('Playing as the murderer', 'Your goal is to mislead the group and avoid the final accusation.', [
+      'Your four starting clues describe other guests. The separate “Three true clues” column shows the real evidence against you.',
+      'Use two different starting clues: alter one to clear yourself, and another to frame a guest. You can use each action once.',
+      'Share up to two clues with everyone in the group chat. Altered clues are most useful when you plant them there.',
+      'Compare claims and use private messages for quiet conversations. Your exact-name suggestions to bots do not count toward their votes.',
+      'Two vote calls open voting early. Two postponements resume the investigation; the ten-minute limit still applies.'
+    ], 'murderer-guide'),
+    makeGuide('Playing as an innocent guest', 'Your goal is to compare evidence, identify the murderer, and persuade the guests to vote for them.', [
+      'Start with four random clues about other guests. Clues shared later appear in a separate section.',
+      'Use “Share with group” to show a clue to everyone. Each guest can share up to two clues; group messages and clue posts are public to the room.',
+      'Inspect one clue per round to check for tampering, and use the suspect matrix to track means, motive, and opportunity.',
+      'You can privately message a bot an exact guest name as a vote suggestion. Innocent guests’ suggestions count; the bot follows the most suggested name and breaks ties randomly.',
+      'Two vote calls open voting early. Two postponements resume the investigation; the ten-minute limit still applies.'
+    ], 'guest-guide')
+  );
+  appRoot.appendChild(grid);
+}
+landing = function() { baseLanding(); addPerspectiveTutorials(); };
+if (!session) addPerspectiveTutorials();
 const baseRenderLobby = renderLobby;
 const enhancedRenderLobby = function(players) {
   baseRenderLobby(players);
@@ -44,16 +83,21 @@ const enhancedRenderLobby = function(players) {
   const start = document.getElementById('begin');
   if (start) start.disabled = !(session.mode === 'practice' || session.host && players.length >= 3);
   if (!session.host || session.mode !== 'party') { window.renderLobby = enhancedRenderLobby; return; }
-  const available = ['Lady Winnie', 'Red Jackson', 'Lord Ashford', 'Mira Bell', 'Evelyn Vale'].filter(name => !players.some(p => p.name === name));
+  const available = ['Lady Winnie', 'Red Jackson', 'Lord Ashford', 'Mira Bell', 'Evelyn Vale'].filter(name => !players.some(p => p.name.toLowerCase() === name.toLowerCase()));
   const panel = document.createElement('div'); panel.className = 'field';
-  const label = document.createElement('label'); label.textContent = 'Add a bot guest';
-  const select = document.createElement('select'); select.id = 'botChoice';
-  const prompt = document.createElement('option'); prompt.value = ''; prompt.textContent = players.length >= 9 ? 'The manor is full' : available.length ? 'Choose a personality' : 'All manor guests are already here'; select.appendChild(prompt);
+  const label = document.createElement('label'); label.textContent = 'Add up to two bots at once';
+  const row = document.createElement('div'); row.className = 'row';
+  const first = document.createElement('select'); first.id = 'botChoiceOne';
+  const second = document.createElement('select'); second.id = 'botChoiceTwo';
+  const firstPrompt = document.createElement('option'); firstPrompt.value = ''; firstPrompt.textContent = players.length >= 9 ? 'The manor is full' : 'Choose a bot'; first.appendChild(firstPrompt);
+  const secondPrompt = document.createElement('option'); secondPrompt.value = ''; secondPrompt.textContent = 'Optional second bot'; second.appendChild(secondPrompt);
   const styles = { 'Lady Winnie': 'red herrings and gossip', 'Red Jackson': 'clues that clear a player', 'Lord Ashford': 'clues that clear himself', 'Mira Bell': 'clues that suggest guilt', 'Evelyn Vale': 'random clues' };
-  available.forEach(name => { const option = document.createElement('option'); option.value = name; option.textContent = `${name} — ${styles[name]}`; select.appendChild(option); });
-  const button = document.createElement('button'); button.type = 'button'; button.className = 'btn secondary'; button.textContent = 'Add bot'; button.disabled = !available.length || players.length >= 9;
-  button.onclick = () => select.value && action('addBot', { name: select.value });
-  panel.append(label, select, button);
+  available.forEach(name => { const text = `${name} — ${styles[name]}`; const one = document.createElement('option'); one.value = name; one.textContent = text; first.appendChild(one); const two = document.createElement('option'); two.value = name; two.textContent = text; second.appendChild(two); });
+  function avoidDuplicateChoice() { Array.from(second.options).forEach(option => { if (option.value) option.disabled = option.value === first.value; }); Array.from(first.options).forEach(option => { if (option.value) option.disabled = option.value === second.value; }); }
+  first.addEventListener('change', avoidDuplicateChoice); second.addEventListener('change', avoidDuplicateChoice); row.append(first, second);
+  const button = document.createElement('button'); button.type = 'button'; button.className = 'btn secondary'; button.textContent = 'Add selected bots'; button.disabled = !available.length || players.length >= 9;
+  button.onclick = () => { const names = [first.value, second.value].filter(Boolean).slice(0, Math.min(2, 9 - players.length)); if (!names.length) return toast('Choose at least one bot.'); action('addBots', { names }); };
+  panel.append(label, row, button);
   document.getElementById('guests')?.insertAdjacentElement('afterend', panel);
   window.renderLobby = enhancedRenderLobby;
 };
