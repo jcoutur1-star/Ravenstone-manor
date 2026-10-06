@@ -49,7 +49,9 @@ export default async (request) => {
       return json(view(room, player));
     }
     if (operation === "action" && request.method === "POST") {
-      const result = act(room, player, await request.json());
+      const action = await request.json();
+      if (action.type === "addBot" || action.type === "addBots") return await addBotsWithRetry(supabase, row, auth, action);
+      const result = act(room, player, action);
       if (result?.error) return json({ error: result.error }, result.status || 400);
       const saved = await persist(supabase, row, room);
       if (!saved) return json({ error: "The room changed at the same time. Please try that action again." }, 409);
@@ -107,6 +109,30 @@ async function joinRoom(client, row, room, body) {
   const saved = await persist(client, row, room);
   if (!saved) return json({ error: "The room changed at the same time. Please try joining again." }, 409);
   return json({ code: room.code, playerId: player.id, token: player.token, mode: room.mode, host: false, players: cleanPlayers(room) });
+}
+
+async function addBotsWithRetry(client, initialRow, auth, action) {
+  const requested = Array.isArray(action.names) ? action.names : [action.name];
+  const names = [...new Set(requested.map((name) => String(name || "").trim()).filter(Boolean))];
+  if (!names.length || names.some((name) => !botNames.includes(name))) return json({ error: "Choose one or more available manor guests." }, 400);
+  let row = initialRow;
+  for (let attempt = 0; attempt < 4; attempt++) {
+    const room = row.state;
+    const host = room.players.find((p) => p.token && p.token === auth);
+    if (!host || host.id !== room.hostId) return json({ error: "Only the host can add bots." }, 403);
+    if (room.status !== "lobby") return json({ error: "Bots can only be added before the investigation begins." }, 409);
+    const conflicts = names.filter((name) => room.players.some((p) => p.name.toLowerCase() === name.toLowerCase() && !p.bot));
+    if (conflicts.length) return json({ error: `${conflicts.join(", ")} already belongs to a guest.` }, 409);
+    const missing = names.filter((name) => !room.players.some((p) => p.bot && p.name === name));
+    if (room.players.length + missing.length > 9) return json({ error: "The manor is full (9 guests maximum)." }, 409);
+    for (const name of missing) room.players.push({ id: uid(), name, token: "", bot: true, role: null, clues: [], matrix: {}, shares: [], inspected: false, tamperUsed: false, tamperSelfUsed: false, tamperFrameUsed: false, tamperedClues: [] });
+    if (!missing.length || await persist(client, row, room)) return json(view(room, host));
+    const { data, error } = await client.from("ravenstone_rooms").select("*").eq("code", room.code).maybeSingle();
+    if (error) throw error;
+    if (!data) return json({ error: "This room no longer exists." }, 404);
+    row = data;
+  }
+  return json({ error: "The lobby changed while bots were being added. Please try again." }, 409);
 }
 
 function view(room, player) {
