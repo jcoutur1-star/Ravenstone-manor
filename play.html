@@ -26,7 +26,7 @@ window.addEventListener('ravenstone-realtime-ready',()=>{if(session)connect()});
 async function refreshState(){if(!session)return;try{game=await api(`/api/rooms/${session.code}/state`);render()}catch(e){if(!$('#error'))toast(e.message)}}
 async function action(type,more={}){try{await api(`/api/rooms/${session.code}/action`,{type,...more});window.ravenstoneNotify?.(session.code);await refreshState()}catch(e){toast(e.message)}}
 function renderLobby(players){const bots=players.filter(p=>p.bot);app.innerHTML=`<div class="bar"><div>ROOM CODE <span class="code">${esc(session.code)}</span> <button class="btn quiet" id="copy">Copy</button></div><span class="pill">${session.mode==='practice'?'BOT PRACTICE':session.host?'HOST':'GUEST'}</span></div><div class="lobby"><section class="card"><h2 class="title">The guests</h2><p class="note">Share the room code with your party. The host can begin once at least three human guests have joined.</p><div id="guests" class="list"></div><div style="height:16px"></div><button class="btn primary" id="begin" ${session.mode==='practice'?'':'disabled'}>Begin investigation</button><button class="btn quiet" id="leave" style="margin-left:8px">Leave room</button><div id="error" class="err" style="margin-top:10px"></div></section><section class="card"><h2 class="title">The case</h2><p class="note">Every guest receives four private clues. Compare what you have, mark each suspect, and inspect one clue for tampering.</p><p class="note">Two players may call for an early vote. Any two players may postpone it to continue investigating; the ten-minute limit still applies.</p>${session.mode==='practice'?'<p class="note" style="color:var(--gold)">Practice room: three bot guests are ready. Your selected role stays secret until the case starts.</p>':''}</section></div>`;
-const draw=ps=>{$('#guests').innerHTML=ps.map(p=>`<div class="guest"><span>${esc(p.name)}${p.id===session.playerId?' <span class="note">(you)</span>':''}${p.bot?' <span class="note">· bot</span>':''}</span><span>${p.host?'Host':'Guest'}</span></div>`).join('');const start=$('#begin');if(start){start.disabled=!(session.mode==='practice'||session.host&&ps.filter(p=>!p.bot).length>=3);start.textContent=session.mode==='practice'?'Begin bot investigation':'Begin investigation'}};window.renderLobby=draw;draw(players);
+const draw=ps=>{const guestList=document.getElementById('guests');if(guestList)guestList.innerHTML=ps.map(p=>`<div class="guest"><span>${esc(p.name)}${p.id===session.playerId?' <span class="note">(you)</span>':''}${p.bot?' <span class="note">· bot</span>':''}</span><span>${p.host?'Host':'Guest'}</span></div>`).join('');const start=document.getElementById('begin');if(start){start.disabled=!(session.mode==='practice'||session.host&&ps.filter(p=>!p.bot).length>=3);start.textContent=session.mode==='practice'?'Begin bot investigation':'Begin investigation'}};window.renderLobby=draw;draw(players);
 $('#begin').onclick=()=>action('start');$('#leave').onclick=()=>{closeSync();localStorage.removeItem('ravenstone-session');session=null;game=null;landing()};$('#copy').onclick=()=>navigator.clipboard?.writeText(session.code).then(()=>toast('Room code copied.')).catch(()=>toast(session.code));}
 function roleText(role){return role==='murderer'?'You are the murderer. Keep your means, motive, and opportunity hidden.':'You are innocent. Find the murderer before the guests vote.'}
 function render(){if(!game)return;if(game.status==='lobby'){renderLobby(game.players);return}if(game.status==='results'){results();return}const mins=String(Math.floor(game.secondsLeft/60)).padStart(2,'0'),secs=String(game.secondsLeft%60).padStart(2,'0'),clues=game.me.clues||[];app.innerHTML=`<div class="bar"><div>ROOM <span class="code">${esc(game.code)}</span> · <span class="pill">${esc(game.status==='voting'?'VOTING OPEN':'INVESTIGATION')}</span></div><div style="text-align:right"><div class="timer">${mins}:${secs}</div><div class="note">time remaining</div></div></div><div class="phase"><div><strong>${game.status==='voting'?'Cast your vote':'Investigation open'}</strong><div class="note">${game.status==='voting'?`Votes submitted: ${game.votesSubmitted}/${game.players.length}. Two postponements resume discussion.`:'Two calls open voting early. Any two players can postpone; the ten-minute limit still applies.'}</div></div><div class="actions"><button class="btn secondary" id="call" ${game.status!=='investigation'?'disabled':''}>Call vote (${game.calls}/2)</button><button class="btn quiet" id="postpone" ${game.status!=='voting'?'disabled':''}>Postpone (${game.postpones}/2)</button></div></div><div class="tabs"><button class="tab ${tab==='evidence'?'active':''}" data-tab="evidence">Evidence</button><button class="tab ${tab==='matrix'?'active':''}" data-tab="matrix">Means · motive · opportunity</button></div><div class="${tab==='evidence'?'':'hidden'}"><div class="two"><section class="card"><h2 class="title">Your evidence</h2><p class="note">${esc(roleText(game.me.role))} · Directly share up to two clues.</p>${clues.map(c=>`<div class="evidence ${c.original?'changed':''}"><small>${esc(c.category)}${c.sharedBy?` · shared by ${esc(c.sharedBy)}`:''}</small>${esc(c.text)}${c.inspection?`<div class="note" style="margin-top:7px;color:${c.inspection.tampered?'var(--gold)':'var(--green)'}">${c.inspection.tampered?`Tampered. Original: “${esc(c.inspection.original)}”`:'Inspected: clue is original.'}</div>`:''}<div class="actions" style="margin-top:9px"><button class="btn quiet" data-inspect="${esc(c.id)}" ${game.me.inspected?'disabled':''}>Inspect</button><select data-share="${esc(c.id)}" aria-label="Share clue" ${game.me.shareCount>=2||c.sharedBy?'disabled':''}><option value="">Share with… (${game.me.shareCount}/2)</option>${game.players.filter(p=>p.id!==game.me.id&&!p.bot).map(p=>`<option value="${esc(p.id)}">${esc(p.name)}</option>`).join('')}</select></div></div>`).join('')}</section><section class="card"><h2 class="title">The guests</h2><p class="note">Your evidence belongs to you. Bring your clues to the discussion.</p><div class="list">${game.players.map(p=>`<div class="guest"><span>${esc(p.name)}${p.bot?' · bot':''}</span><span>${p.host?'Host':'Guest'}</span></div>`).join('')}</div>${game.status==='voting'?`<div style="border-top:1px solid var(--line);margin:19px 0"></div><h2 class="title">Accuse one guest</h2><div class="vote-options">${game.players.filter(p=>p.id!==game.me.id).map(p=>`<button class="${selectedVote===p.id?'selected':''}" data-vote="${esc(p.id)}">${esc(p.name)}</button>`).join('')}</div><button class="btn primary" id="cast" style="margin-top:13px">Lock my vote</button>`:''}</section></div></div><div class="${tab==='matrix'?'':'hidden'}"><section class="card"><h2 class="title">Suspect matrix</h2><p class="note">Any No clears a player; three Yes marks a player red. Red and yellow remain uncleared.</p><div class="matrix-wrap"><table class="matrix"><thead><tr><th>Guest</th><th>Means</th><th>Motive</th><th>Opportunity</th><th>Status</th></tr></thead><tbody>${game.players.map(p=>{const vals=game.matrix[p.name]||{},arr=['Means','Motive','Opportunity'].map(c=>vals[c]||'?'),clear=arr.includes('N'),sure=arr.every(x=>x==='Y'),status=clear?'Cleared':sure?'Not cleared':'Not cleared';return `<tr><td>${esc(p.name)}${p.bot?' · bot':''}</td>${['Means','Motive','Opportunity'].map((c,i)=>`<td><select data-suspect="${esc(p.name)}" data-category="${c}">${['?','Y','N'].map(v=>`<option ${arr[i]===v?'selected':''}>${v}</option>`).join('')}</select></td>`).join('')}<td class="${clear?'cleared':sure?'red':'yellow'}">${status}</td></tr>`}).join('')}</tbody></table></div></section></div>`;
@@ -36,6 +36,29 @@ function $$(s){return [...document.querySelectorAll(s)]}loadSession();if(session
 </script>
 <script>
 /* Gameplay enhancements: immediate entry, explicit clue sharing, murderer tampering, and private DMs. */
+const baseRenderLobby = renderLobby;
+const enhancedRenderLobby = function(players) {
+  baseRenderLobby(players);
+  const note = document.querySelector('.lobby .card .note');
+  if (note) note.textContent = 'Share the room code with your party. The host can begin once three guests, including bots, have joined.';
+  const start = document.getElementById('begin');
+  if (start) start.disabled = !(session.mode === 'practice' || session.host && players.length >= 3);
+  if (!session.host || session.mode !== 'party') { window.renderLobby = enhancedRenderLobby; return; }
+  const available = ['Lady Winnie', 'Red Jackson', 'Lord Ashford', 'Mira Bell', 'Evelyn Vale'].filter(name => !players.some(p => p.name === name));
+  const panel = document.createElement('div'); panel.className = 'field';
+  const label = document.createElement('label'); label.textContent = 'Add a bot guest';
+  const select = document.createElement('select'); select.id = 'botChoice';
+  const prompt = document.createElement('option'); prompt.value = ''; prompt.textContent = players.length >= 9 ? 'The manor is full' : available.length ? 'Choose a personality' : 'All manor guests are already here'; select.appendChild(prompt);
+  const styles = { 'Lady Winnie': 'red herrings and gossip', 'Red Jackson': 'clues that clear a player', 'Lord Ashford': 'clues that clear himself', 'Mira Bell': 'clues that suggest guilt', 'Evelyn Vale': 'random clues' };
+  available.forEach(name => { const option = document.createElement('option'); option.value = name; option.textContent = `${name} — ${styles[name]}`; select.appendChild(option); });
+  const button = document.createElement('button'); button.type = 'button'; button.className = 'btn secondary'; button.textContent = 'Add bot'; button.disabled = !available.length || players.length >= 9;
+  button.onclick = () => select.value && action('addBot', { name: select.value });
+  panel.append(label, select, button);
+  document.getElementById('guests')?.insertAdjacentElement('afterend', panel);
+  window.renderLobby = enhancedRenderLobby;
+};
+renderLobby = enhancedRenderLobby;
+window.renderLobby = enhancedRenderLobby;
 enter = function(s) {
   saveSession(s);
   selectedVote = '';
@@ -59,7 +82,7 @@ action = async function(type, more = {}) {
   }
 };
 
-function addGameplayTools(savedTarget, savedDraft, restoreFocus, caret) {
+function addGameplayTools(savedTarget, savedDraft, restoreFocus, caret, savedTamperClue, savedTamperTarget) {
   if (!game || !['investigation', 'voting'].includes(game.status)) return;
 
   document.querySelectorAll('select[data-share]').forEach(function(select) {
@@ -107,6 +130,7 @@ function addGameplayTools(savedTarget, savedDraft, restoreFocus, caret) {
         option.textContent = c.category + ' — ' + c.text;
         clueSelect.appendChild(option);
       });
+      if (savedTamperClue && Array.from(clueSelect.options).some(function(o) { return o.value === savedTamperClue; })) clueSelect.value = savedTamperClue;
       clueField.append(clueLabel, clueSelect);
       const targetField = document.createElement('div');
       targetField.className = 'field';
@@ -124,6 +148,7 @@ function addGameplayTools(savedTarget, savedDraft, restoreFocus, caret) {
         option.textContent = p.name + (p.bot ? ' · bot' : '');
         targetSelect.appendChild(option);
       });
+      if (savedTamperTarget && Array.from(targetSelect.options).some(function(o) { return o.value === savedTamperTarget; })) targetSelect.value = savedTamperTarget;
       targetField.append(targetLabel, targetSelect);
       const tamperButton = document.createElement('button');
       tamperButton.type = 'button';
@@ -143,19 +168,20 @@ function addGameplayTools(savedTarget, savedDraft, restoreFocus, caret) {
 
   const chat = document.createElement('section');
   chat.className = 'card';
+  chat.id = 'privateChat';
   chat.style.marginTop = '18px';
   const chatTitle = document.createElement('h2');
   chatTitle.className = 'title';
   chatTitle.textContent = 'Private messages';
   const chatNote = document.createElement('p');
   chatNote.className = 'note';
-  chatNote.textContent = 'Only you and the selected guest can see this conversation.';
+  chatNote.textContent = 'Only you and the selected guest can see this conversation. To influence a bot, send its exact guest name during the investigation; only innocent players’ suggestions count.';
   chat.append(chatTitle, chatNote);
-  const recipients = game.players.filter(function(p) { return p.id !== game.me.id && !p.bot; });
+  const recipients = game.players.filter(function(p) { return p.id !== game.me.id; });
   if (!recipients.length) {
     const empty = document.createElement('p');
     empty.className = 'note';
-    empty.textContent = 'Private messages are available when another human guest joins this room.';
+    empty.textContent = 'Private messages are available when another guest joins this room.';
     chat.appendChild(empty);
   } else {
     const target = recipients.some(function(p) { return p.id === savedTarget; }) ? savedTarget : recipients[0].id;
@@ -168,7 +194,7 @@ function addGameplayTools(savedTarget, savedDraft, restoreFocus, caret) {
     recipients.forEach(function(p) {
       const option = document.createElement('option');
       option.value = p.id;
-      option.textContent = p.name;
+      option.textContent = p.name + (p.bot ? ' · bot' : '');
       option.selected = p.id === target;
       select.appendChild(option);
     });
@@ -231,6 +257,35 @@ function addGameplayTools(savedTarget, savedDraft, restoreFocus, caret) {
     chat.append(field, log, compose);
   }
   app.appendChild(chat);
+  if (game.me.role === 'murderer' && game.me.trueEvidence && game.me.trueEvidence.length) {
+    const truth = document.createElement('section');
+    truth.className = 'card';
+    truth.innerHTML = '<h2 class="title">The three true clues</h2><p class="note">These are the real pieces of evidence that point to you. Keep them beside your four assigned clues.</p>' + game.me.trueEvidence.map(function(c) { return '<div class="evidence"><small>' + esc(c.category) + '</small>' + esc(c.text) + '</div>'; }).join('');
+    const columns = document.querySelector('.two');
+    if (columns) {
+      columns.style.gridTemplateColumns = window.innerWidth <= 700 ? '1fr' : 'repeat(3, minmax(0, 1fr))';
+      columns.appendChild(truth);
+    } else app.appendChild(truth);
+  }
+  document.querySelectorAll('.guest').forEach(function(row) {
+    const nameCell = row.querySelector('span:first-child');
+    if (!nameCell || row.dataset.clickable) return;
+    const player = game.players.find(function(p) { return nameCell.textContent.trim().startsWith(p.name); });
+    if (!player || player.id === game.me.id) return;
+    const button = document.createElement('button');
+    button.type = 'button'; button.className = 'guest-name'; button.textContent = nameCell.textContent.trim(); button.dataset.player = player.id;
+    button.style.cssText = 'border:0;background:transparent;color:inherit;padding:0;text-align:left;text-decoration:underline;text-decoration-color:var(--purple);text-underline-offset:3px;cursor:pointer';
+    nameCell.replaceWith(button); row.dataset.clickable = 'true';
+  });
+  document.querySelectorAll('[data-player]').forEach(function(button) {
+    button.addEventListener('click', function() {
+      const target = button.dataset.player;
+      const chatTarget = document.getElementById('privateChatTarget');
+      if (chatTarget) { chatTarget.value = target; render(); document.getElementById('privateChatDraft')?.focus(); }
+      document.querySelectorAll('select[data-share]').forEach(function(s) { if (Array.from(s.options).some(function(o) { return o.value === target; })) { s.value = target; s.dispatchEvent(new Event('change', { bubbles: true })); } });
+      document.getElementById('privateChat')?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    });
+  });
   const draft = document.getElementById('privateChatDraft');
   if (draft && restoreFocus) {
     draft.focus();
@@ -242,12 +297,18 @@ const originalRender = render;
 render = function() {
   const oldTarget = document.getElementById('privateChatTarget');
   const oldDraft = document.getElementById('privateChatDraft');
+  const oldTamperClue = document.getElementById('tamperClue');
+  const oldTamperTarget = document.getElementById('tamperTarget');
   const restoreFocus = document.activeElement && document.activeElement.id === 'privateChatDraft';
   const caret = oldDraft && typeof oldDraft.selectionStart === 'number' ? oldDraft.selectionStart : 0;
   const savedTarget = oldTarget ? oldTarget.value : '';
   const savedDraft = oldDraft ? oldDraft.value : '';
+  const savedTamperClue = oldTamperClue ? oldTamperClue.value : '';
+  const savedTamperTarget = oldTamperTarget ? oldTamperTarget.value : '';
   originalRender();
-  addGameplayTools(savedTarget, savedDraft, restoreFocus, caret);
+  const evidenceNote = document.querySelector('.two .card .note');
+  if (evidenceNote && game && game.me) evidenceNote.textContent = roleText(game.me.role) + ' · Your four clues concern other guests. Share up to two directly.';
+  addGameplayTools(savedTarget, savedDraft, restoreFocus, caret, savedTamperClue, savedTamperTarget);
 };
 </script>
 <script type="module">
