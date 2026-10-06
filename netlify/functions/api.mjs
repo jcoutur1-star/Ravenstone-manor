@@ -2,6 +2,7 @@ import { createClient } from "@supabase/supabase-js";
 
 const alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
 const pick = (items) => items[Math.floor(Math.random() * items.length)];
+const botNames = ["Lady Winnie", "Red Jackson", "Lord Ashford", "Mira Bell", "Evelyn Vale"];
 const uid = () => crypto.randomUUID();
 const makeToken = () => Array.from(crypto.getRandomValues(new Uint8Array(24)), (n) => alphabet[n % alphabet.length]).join("");
 const json = (data, status = 200) => Response.json(data, { status, headers: { "cache-control": "no-store" } });
@@ -69,7 +70,7 @@ async function persist(client, oldRow, room) {
     version: oldRow.version + 1,
     status: room.status,
     visibility: room.visibility,
-    player_count: room.players.filter((p) => !p.bot).length,
+      player_count: room.players.length,
     updated_at: new Date().toISOString()
   };
   const { data, error } = await client.from("ravenstone_rooms").update(updated).eq("code", room.code).eq("version", oldRow.version).select("version").maybeSingle();
@@ -89,7 +90,7 @@ async function createRoom(client, body) {
       room.practiceRole = body.practiceRole === "innocent" ? "innocent" : "murderer";
       for (const name of ["Evelyn Vale", "Lord Ashford", "Mira Bell"]) room.players.push({ id: uid(), name, token: "", bot: true, role: null, clues: [], matrix: {}, shares: [], inspected: false, tamperUsed: false });
     }
-    const { error } = await client.from("ravenstone_rooms").insert({ code, state: room, version: 1, status: "lobby", visibility, player_count: 1 });
+    const { error } = await client.from("ravenstone_rooms").insert({ code, state: room, version: 1, status: "lobby", visibility, player_count: room.players.length });
     if (!error) return json({ code, playerId: player.id, token: player.token, mode, host: true, players: cleanPlayers(room) });
     if (error.code !== "23505") throw error;
   }
@@ -98,7 +99,7 @@ async function createRoom(client, body) {
 
 async function joinRoom(client, row, room, body) {
   if (room.mode !== "party" || room.status !== "lobby") return json({ error: "That room is not open for guests." }, 409);
-  if (room.players.filter((p) => !p.bot).length >= 9) return json({ error: "This room is full." }, 409);
+  if (room.players.length >= 9) return json({ error: "This room is full." }, 409);
   const name = String(body.name || "Guest").trim().slice(0, 20);
   if (room.players.some((p) => p.name.toLowerCase() === name.toLowerCase())) return json({ error: "That name is already at the manor." }, 409);
   const player = { id: uid(), name, token: makeToken(), bot: false, role: null, clues: [], matrix: {}, shares: [], inspected: false, tamperUsed: false };
@@ -111,11 +112,11 @@ async function joinRoom(client, row, room, body) {
 function view(room, player) {
   return {
     code: room.code, status: room.status, mode: room.mode, visibility: room.visibility, players: cleanPlayers(room),
-    me: { id: player.id, name: player.name, role: player.role, clues: player.clues.map((c) => ({ id: c.id, category: c.category, text: c.text, sharedBy: c.sharedBy, inspection: c.inspection })), inspected: player.inspected, shareCount: player.shares.length, tamperUsed: Boolean(player.tamperUsed) },
+    me: { id: player.id, name: player.name, role: player.role, clues: player.clues.map((c) => ({ id: c.id, category: c.category, text: c.text, sharedBy: c.sharedBy, inspection: c.inspection })), trueEvidence: player.id === room.case?.killer ? room.case.key : [], inspected: player.inspected, shareCount: player.shares.length, tamperUsed: Boolean(player.tamperUsed) },
     messages: (room.messages || []).filter((m) => m.from === player.id || m.to === player.id).slice(-100),
     matrix: player.matrix || {}, secondsLeft: room.status === "investigation" ? Math.max(0, Math.ceil((room.deadline - Date.now()) / 1000)) : 600,
     calls: room.calls.length, postpones: room.postpones.length, votesSubmitted: Object.keys(room.votes).length,
-    canStart: player.id === room.hostId && (room.mode === "practice" || room.players.filter((p) => !p.bot).length >= 3),
+    canStart: player.id === room.hostId && (room.mode === "practice" || room.players.length >= 3),
     caseReveal: room.status === "results" ? { killer: room.case.killer, weapon: room.case.weapon, key: room.case.key, altered: room.case.altered, tally: room.case.tally, winner: room.case.winner } : null
   };
 }
@@ -125,13 +126,23 @@ function makeCase(room) {
   const killer = room.mode === "practice" ? (room.practiceRole === "murderer" ? humans[0] : pick(bots)) : pick(humans);
   for (const p of room.players) p.role = p.id === killer.id ? "murderer" : "innocent";
   const weapon = pick(["knife", "gun", "poison"]);
-  const key = ["Motive", "Means", "Opportunity"].map((category) => ({ category, text: category === "Means" ? (weapon === "poison" ? `${killer.name} knew where the household poisons were kept.` : weapon === "gun" ? `${killer.name} had a gun in their luggage.` : `${killer.name} knew Cheryl hid a private knife beneath her bed.`) : fact(category, killer.name).text }));
+  const key = ["Motive", "Means", "Opportunity"].map((category) => ({ id: uid(), category, text: category === "Means" ? (weapon === "poison" ? `${killer.name} knew where the household poisons were kept.` : weapon === "gun" ? `${killer.name} had a gun in their luggage.` : `${killer.name} knew Cheryl hid a private knife beneath her bed.`) : fact(category, killer.name).text, original: null }));
   room.case = { killer: killer.id, weapon, key, altered: [], tally: {}, winner: null };
+  const evidencePool = [...key];
   for (const p of room.players) {
-    const own = key.filter((c) => c.text.startsWith(p.name + " ")).map((c) => ({ id: uid(), category: c.category, text: c.text, original: null }));
-    const extras = [fact("Counter", p.name), fact(p.id === killer.id ? "Red" : "Motive", p.name)];
-    while (own.length + extras.length < 4) extras.push(fact(p.id === killer.id ? "Red" : pick(["Counter", "Red", "Motive", "Means", "Opportunity"]), p.name));
-    p.clues = [...own, ...extras].slice(0, 4);
+    evidencePool.push(fact("Counter", p.name), fact("Red", p.name));
+    evidencePool.push(fact(pick(["Motive", "Means", "Opportunity", "Counter", "Red"]), p.name));
+    evidencePool.push(fact(pick(["Motive", "Means", "Opportunity", "Counter", "Red"]), p.name));
+  }
+  for (const p of room.players) {
+    p.clues = [];
+    const available = evidencePool.filter((c) => !c.text.startsWith(p.name + " "));
+    while (p.clues.length < 4 && available.length) {
+      const index = Math.floor(Math.random() * available.length);
+      p.clues.push({ ...available.splice(index, 1)[0], id: uid() });
+    }
+    p.clues = p.clues.slice(0, 4);
+    if (p.bot) p.cluePool = evidencePool;
   }
   if (room.mode === "practice" && room.practiceRole === "innocent") {
     const botKiller = bots.find((p) => p.id === killer.id);
@@ -145,22 +156,45 @@ function makeCase(room) {
       room.case.altered.push({ from, to: clue.text });
     }
   }
-  if (room.mode === "practice") for (const bot of bots) {
-    const sample = bot.id === killer.id ? (bot.clues.find((c) => c.original) || pick(bot.clues)) : pick(bot.clues);
-    room.players[0].clues.push({ ...sample, sharedBy: bot.name });
+  for (const bot of bots) {
+    const availableHumans = humans;
+    const used = new Set();
+    for (let i = 0; i < availableHumans.length; i++) {
+      const pool = bot.cluePool || bot.clues;
+      let candidates = pool;
+      if (bot.name === "Lady Winnie") candidates = pool.filter((c) => ["Red", "Motive"].includes(c.category));
+      if (bot.name === "Red Jackson") candidates = pool.filter((c) => c.category === "Counter");
+      if (bot.name === "Lord Ashford") candidates = pool.filter((c) => c.category === "Counter" && c.text.startsWith("Lord Ashford "));
+      if (bot.name === "Mira Bell") candidates = pool.filter((c) => ["Means", "Motive", "Opportunity"].includes(c.category));
+      if (!candidates.length) candidates = pool;
+      const fresh = candidates.filter((c) => !used.has(c.id));
+      const altered = bot.id === killer.id && bot.clues.find((c) => c.original);
+      const sample = altered && i === 0 ? altered : bot.name === "Evelyn Vale" ? pick(pool) : pick(fresh.length ? fresh : candidates);
+      used.add(sample.id);
+      availableHumans[i].clues.push({ ...sample, id: uid(), sharedBy: bot.name });
+    }
   }
+  room.botNominations = {};
   room.case.killerName = killer.name; room.status = "investigation"; room.deadline = Date.now() + 600000; room.calls = []; room.postpones = []; room.votes = {};
 }
 
 function act(room, player, action) {
   if (action.type === "message") {
     if (!["lobby", "investigation", "voting"].includes(room.status)) return { error: "Private messages are closed for this round." };
-    const target = room.players.find((p) => p.id === action.target && !p.bot && p.id !== player.id);
+    const target = room.players.find((p) => p.id === action.target && p.id !== player.id);
     const text = String(action.text || "").trim().slice(0, 500);
-    if (!target) return { error: "Choose another human guest for your private message." };
+    if (!target) return { error: "Choose another guest for your private message." };
     if (!text) return { error: "Type a message before sending." };
     room.messages ||= [];
     room.messages.push({ id: uid(), from: player.id, to: target.id, text, createdAt: Date.now() });
+    if (target.bot && player.role === "innocent" && ["investigation", "voting"].includes(room.status)) {
+      const nominee = room.players.find((p) => p.id !== player.id && p.name.toLowerCase() === text.toLowerCase());
+      if (nominee) {
+        room.botNominations ||= {};
+        room.botNominations[target.id] ||= {};
+        room.botNominations[target.id][player.id] = nominee.id;
+      }
+    }
     if (room.messages.length > 300) room.messages.splice(0, room.messages.length - 300);
     return {};
   }
@@ -181,8 +215,17 @@ function act(room, player, action) {
     return {};
   }
   if (action.type === "start") {
-    if (player.id !== room.hostId || room.status !== "lobby" || (room.mode === "party" && room.players.filter((p) => !p.bot).length < 3)) return { error: "The host can begin once three guests have joined." };
+    if (player.id !== room.hostId || room.status !== "lobby" || (room.mode === "party" && room.players.length < 3)) return { error: "The host can begin once three guests, including bots, have joined." };
     makeCase(room); return {};
+  }
+  if (action.type === "addBot") {
+    if (player.id !== room.hostId || room.status !== "lobby") return { error: "Only the host can add a bot before the investigation begins." };
+    if (room.players.length >= 9) return { error: "The manor is full (9 guests maximum)." };
+    const name = String(action.name || "");
+    if (!botNames.includes(name)) return { error: "Choose one of the manor's available guests." };
+    if (room.players.some((p) => p.name === name)) return { error: `${name} is already in this room.` };
+    room.players.push({ id: uid(), name, token: "", bot: true, role: null, clues: [], matrix: {}, shares: [], inspected: false, tamperUsed: false });
+    return {};
   }
   if (action.type === "matrix") { player.matrix[action.suspect] ||= {}; player.matrix[action.suspect][action.category] = action.value; return {}; }
   if (action.type === "share") {
@@ -209,9 +252,16 @@ function act(room, player, action) {
   if (action.type === "vote") {
     if (room.status !== "voting" || !room.players.some((p) => p.id === action.target)) return { error: "Voting is not open or that suspect is invalid." };
     room.votes[player.id] = action.target;
-    if (room.mode === "practice") {
-      const bots = room.players.filter((p) => p.bot), decoys = room.players.filter((p) => p.id !== room.case.killer && p.id !== player.id);
-      bots.forEach((bot, i) => { room.votes[bot.id] = room.practiceRole === "murderer" ? decoys[i % decoys.length]?.id || room.case.killer : (i === 0 ? room.case.killer : decoys[i - 1]?.id || room.case.killer); });
+    const humans = room.players.filter((p) => !p.bot);
+    if (humans.every((p) => room.votes[p.id])) {
+      for (const bot of room.players.filter((p) => p.bot)) {
+        const counts = {};
+        for (const nominee of Object.values(room.botNominations?.[bot.id] || {})) counts[nominee] = (counts[nominee] || 0) + 1;
+        const max = Math.max(0, ...Object.values(counts));
+        const favored = Object.keys(counts).filter((id) => counts[id] === max && room.players.some((p) => p.id === id));
+        const randomChoices = room.players.filter((p) => p.id !== bot.id);
+        room.votes[bot.id] = max > 0 && favored.length ? pick(favored) : pick(randomChoices).id;
+      }
     }
     if (Object.keys(room.votes).length >= room.players.length) {
       room.case.tally = {}; for (const target of Object.values(room.votes)) room.case.tally[target] = (room.case.tally[target] || 0) + 1;
