@@ -19,7 +19,7 @@ async function practice(role){try{const s=await api('/api/rooms',{name:$('#name'
 async function join(code){if(!code)return error(Error('Enter the five-character room code.'));try{const s=await api(`/api/rooms/${encodeURIComponent(code)}/join`,{name:$('#name').value.trim()||'Guest'},false);enter(s)}catch(e){error(e)}}
 async function joinPublic(code){try{const s=await api(`/api/rooms/${encodeURIComponent(code)}/join`,{name:$('#name').value.trim()||'Guest'},false);enter(s)}catch(e){error(e)}}
 async function loadPublic(){const el=$('#publicRooms');if(!el)return;try{const d=await api('/api/public',null,false);el.innerHTML=d.rooms.length?d.rooms.map(r=>`<div class="roomitem"><span>Room <b class="code" style="font-size:17px">${esc(r.code)}</b><br><small class="note">${r.count}/9 guests</small></span><button class="btn secondary" data-join="${esc(r.code)}">Join</button></div>`).join(''):'<div class="note">No open public rooms right now.</div>';el.querySelectorAll('[data-join]').forEach(b=>b.onclick=()=>joinPublic(b.dataset.join))}catch(e){el.innerHTML='<div class="note">Public rooms are temporarily unavailable.</div>'}}
-function enter(s){saveSession(s);selectedVote='';tab='evidence';sync();renderLobby(s.players||[]);connect()}
+function enter(s){saveSession(s);selectedVote='';tab='evidence';renderLobby(s.players||[]);connect()}
 function closeSync(){clearInterval(poll);if(socket){socket.close();socket=null}}
 async function connect(){closeSync();if(window.ravenstoneConnect){try{await window.ravenstoneConnect(session.code)}catch{}}poll=setInterval(refreshState,5000)}
 window.addEventListener('ravenstone-realtime-ready',()=>{if(session)connect()});
@@ -33,7 +33,224 @@ function render(){if(!game)return;if(game.status==='lobby'){renderLobby(game.pla
 $('#call').onclick=()=>action('callVote');$('#postpone').onclick=()=>action('postpone');$$('[data-tab]').forEach(b=>b.onclick=()=>{tab=b.dataset.tab;render()});$$('[data-inspect]').forEach(b=>b.onclick=()=>action('inspect',{clueId:b.dataset.inspect}));$$('[data-share]').forEach(s=>s.onchange=()=>s.value&&action('share',{clueId:s.dataset.share,target:s.value}));$$('[data-suspect]').forEach(s=>s.onchange=()=>action('matrix',{suspect:s.dataset.suspect,category:s.dataset.category,value:s.value}));$$('[data-vote]').forEach(b=>b.onclick=()=>{selectedVote=b.dataset.vote;render()});if($('#cast'))$('#cast').onclick=()=>selectedVote?action('vote',{target:selectedVote}):toast('Choose a suspect first.');}
 function results(){const r=game.caseReveal;app.innerHTML=`<section class="card result"><div class="eyebrow">The case is closed</div><h2>${r.winner==='investigators'?'The murderer is unmasked.':'The murderer escapes justice.'}</h2><p class="note">${r.winner==='investigators'?'The guests correctly identified the murderer.':'The guests did not identify the murderer.'} The culprit was <strong>${esc(game.players.find(p=>p.id===r.killer)?.name||'unknown')}</strong>; the murder weapon was ${esc(r.weapon)}.</p><div class="two" style="text-align:left;margin-top:20px"><div><h3 class="title">The true key</h3>${r.key.map(c=>`<div class="evidence"><small>${esc(c.category)}</small>${esc(c.text)}</div>`).join('')}</div><div><h3 class="title">Altered clues</h3>${r.altered.map(c=>`<div class="evidence changed"><small>Changed evidence</small>${esc(c.from)}<div class="note">to: ${esc(c.to)}</div></div>`).join('')}<h3 class="title" style="margin-top:15px">Vote tally</h3>${Object.entries(r.tally).map(([id,n])=>`<div class="guest"><span>${esc(game.players.find(p=>p.id===id)?.name||'Guest')}</span><span>${n} vote${n===1?'':'s'}</span></div>`).join('')}</div></div><button class="btn primary" id="home" style="margin-top:20px">Return to manor entrance</button></section>`;$('#home').onclick=()=>{closeSync();localStorage.removeItem('ravenstone-session');session=null;game=null;landing()}}
 function $$(s){return [...document.querySelectorAll(s)]}loadSession();if(session){refreshState().then(()=>connect()).catch(()=>{localStorage.removeItem('ravenstone-session');session=null;landing()})}else landing();
-</script><script type="module">
+</script>
+<script>
+/* Gameplay enhancements: immediate entry, explicit clue sharing, murderer tampering, and private DMs. */
+enter = function(s) {
+  saveSession(s);
+  selectedVote = '';
+  tab = 'evidence';
+  renderLobby(s.players || []);
+  connect();
+  refreshState();
+};
+
+action = async function(type, more = {}) {
+  try {
+    const result = await api('/api/rooms/' + session.code + '/action', { type, ...more });
+    window.ravenstoneNotify?.(session.code);
+    await refreshState();
+    if (type === 'share') toast('Clue shared privately.');
+    if (type === 'tamper') toast('Clue altered. Share it privately to plant it.');
+    return result;
+  } catch (e) {
+    toast(e.message);
+    return null;
+  }
+};
+
+function addGameplayTools(savedTarget, savedDraft, restoreFocus, caret) {
+  if (!game || !['investigation', 'voting'].includes(game.status)) return;
+
+  document.querySelectorAll('select[data-share]').forEach(function(select) {
+    select.onchange = null;
+    if (select.options.length) select.options[0].textContent = 'Choose a guest to receive this clue';
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'btn secondary';
+    button.textContent = 'Share privately';
+    button.disabled = select.disabled || !select.value;
+    select.addEventListener('change', function() { button.disabled = select.disabled || !select.value; });
+    button.addEventListener('click', function() {
+      if (!select.value) return toast('Choose a guest first.');
+      action('share', { clueId: select.dataset.share, target: select.value });
+    });
+    select.parentElement.appendChild(button);
+  });
+
+  if (game.me.role === 'murderer') {
+    const evidenceCard = document.querySelector('.tabs + div .two .card') || document.querySelector('.two .card');
+    if (evidenceCard) {
+      const panel = document.createElement('div');
+      panel.className = 'evidence';
+      const label = document.createElement('small');
+      label.textContent = 'MURDERER ACTION · ONCE PER ROUND';
+      const title = document.createElement('h3');
+      title.className = 'title';
+      title.textContent = 'Tamper with a clue';
+      const note = document.createElement('p');
+      note.className = 'note';
+      note.textContent = 'Change one clue in your hand to implicate another guest. You can use this once; share the altered clue to plant it.';
+      const clueField = document.createElement('div');
+      clueField.className = 'field';
+      const clueLabel = document.createElement('label');
+      clueLabel.textContent = 'Choose one of your clues';
+      const clueSelect = document.createElement('select');
+      clueSelect.id = 'tamperClue';
+      const firstClue = document.createElement('option');
+      firstClue.value = '';
+      firstClue.textContent = 'Select a clue';
+      clueSelect.appendChild(firstClue);
+      game.me.clues.filter(function(c) { return !c.sharedBy && !c.inspection?.tampered; }).forEach(function(c) {
+        const option = document.createElement('option');
+        option.value = c.id;
+        option.textContent = c.category + ' — ' + c.text;
+        clueSelect.appendChild(option);
+      });
+      clueField.append(clueLabel, clueSelect);
+      const targetField = document.createElement('div');
+      targetField.className = 'field';
+      const targetLabel = document.createElement('label');
+      targetLabel.textContent = 'Frame this guest';
+      const targetSelect = document.createElement('select');
+      targetSelect.id = 'tamperTarget';
+      const noTarget = document.createElement('option');
+      noTarget.value = '';
+      noTarget.textContent = 'Select a guest';
+      targetSelect.appendChild(noTarget);
+      game.players.filter(function(p) { return p.id !== game.me.id; }).forEach(function(p) {
+        const option = document.createElement('option');
+        option.value = p.id;
+        option.textContent = p.name + (p.bot ? ' · bot' : '');
+        targetSelect.appendChild(option);
+      });
+      targetField.append(targetLabel, targetSelect);
+      const tamperButton = document.createElement('button');
+      tamperButton.type = 'button';
+      tamperButton.id = 'tamperButton';
+      tamperButton.className = 'btn primary';
+      tamperButton.textContent = game.me.tamperUsed ? 'You have used your tamper' : 'Alter selected clue';
+      tamperButton.disabled = Boolean(game.me.tamperUsed) || game.status !== 'investigation';
+      tamperButton.addEventListener('click', function() {
+        if (!clueSelect.value || !targetSelect.value) return toast('Choose a clue and a guest first.');
+        action('tamper', { clueId: clueSelect.value, target: targetSelect.value });
+      });
+      panel.append(label, title, note, clueField, targetField, tamperButton);
+      const firstEvidence = evidenceCard.querySelector('[data-inspect]')?.closest('.evidence');
+      evidenceCard.insertBefore(panel, firstEvidence || null);
+    }
+  }
+
+  const chat = document.createElement('section');
+  chat.className = 'card';
+  chat.style.marginTop = '18px';
+  const chatTitle = document.createElement('h2');
+  chatTitle.className = 'title';
+  chatTitle.textContent = 'Private messages';
+  const chatNote = document.createElement('p');
+  chatNote.className = 'note';
+  chatNote.textContent = 'Only you and the selected guest can see this conversation.';
+  chat.append(chatTitle, chatNote);
+  const recipients = game.players.filter(function(p) { return p.id !== game.me.id && !p.bot; });
+  if (!recipients.length) {
+    const empty = document.createElement('p');
+    empty.className = 'note';
+    empty.textContent = 'Private messages are available when another human guest joins this room.';
+    chat.appendChild(empty);
+  } else {
+    const target = recipients.some(function(p) { return p.id === savedTarget; }) ? savedTarget : recipients[0].id;
+    const field = document.createElement('div');
+    field.className = 'field';
+    const label = document.createElement('label');
+    label.textContent = 'Message privately to';
+    const select = document.createElement('select');
+    select.id = 'privateChatTarget';
+    recipients.forEach(function(p) {
+      const option = document.createElement('option');
+      option.value = p.id;
+      option.textContent = p.name;
+      option.selected = p.id === target;
+      select.appendChild(option);
+    });
+    field.append(label, select);
+    const log = document.createElement('div');
+    log.id = 'privateChatLog';
+    log.style.maxHeight = '230px';
+    log.style.overflowY = 'auto';
+    log.style.display = 'grid';
+    log.style.gap = '8px';
+    const conversation = (game.messages || []).filter(function(m) {
+      return (m.from === game.me.id && m.to === target) || (m.to === game.me.id && m.from === target);
+    });
+    if (!conversation.length) {
+      const empty = document.createElement('p');
+      empty.className = 'note';
+      empty.textContent = 'No private messages yet. Start the conversation.';
+      log.appendChild(empty);
+    } else {
+      conversation.forEach(function(m) {
+        const bubble = document.createElement('div');
+        bubble.className = 'evidence';
+        const who = document.createElement('small');
+        const sender = game.players.find(function(p) { return p.id === m.from; });
+        who.textContent = (m.from === game.me.id ? 'You' : (sender ? sender.name : 'Guest')) + ' · ' + new Date(m.createdAt).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+        const text = document.createElement('div');
+        text.textContent = m.text;
+        bubble.append(who, text);
+        log.appendChild(bubble);
+      });
+    }
+    const compose = document.createElement('div');
+    compose.className = 'field';
+    const composeLabel = document.createElement('label');
+    composeLabel.textContent = 'Your message (up to 500 characters)';
+    const textarea = document.createElement('textarea');
+    textarea.id = 'privateChatDraft';
+    textarea.maxLength = 500;
+    textarea.rows = 3;
+    textarea.placeholder = 'Write a private message…';
+    textarea.value = savedDraft;
+    compose.append(composeLabel, textarea);
+    const send = document.createElement('button');
+    send.type = 'button';
+    send.id = 'privateChatSend';
+    send.className = 'btn secondary';
+    send.textContent = 'Send privately';
+    async function sendMessage() {
+      const text = textarea.value.trim();
+      if (!text) return toast('Write a message first.');
+      const result = await action('message', { target: select.value, text: text });
+      if (result && document.getElementById('privateChatDraft')) document.getElementById('privateChatDraft').value = '';
+    }
+    send.addEventListener('click', sendMessage);
+    textarea.addEventListener('keydown', function(event) {
+      if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); sendMessage(); }
+    });
+    select.addEventListener('change', function() { render(); });
+    compose.appendChild(send);
+    chat.append(field, log, compose);
+  }
+  app.appendChild(chat);
+  const draft = document.getElementById('privateChatDraft');
+  if (draft && restoreFocus) {
+    draft.focus();
+    try { draft.setSelectionRange(caret, caret); } catch {}
+  }
+}
+
+const originalRender = render;
+render = function() {
+  const oldTarget = document.getElementById('privateChatTarget');
+  const oldDraft = document.getElementById('privateChatDraft');
+  const restoreFocus = document.activeElement && document.activeElement.id === 'privateChatDraft';
+  const caret = oldDraft && typeof oldDraft.selectionStart === 'number' ? oldDraft.selectionStart : 0;
+  const savedTarget = oldTarget ? oldTarget.value : '';
+  const savedDraft = oldDraft ? oldDraft.value : '';
+  originalRender();
+  addGameplayTools(savedTarget, savedDraft, restoreFocus, caret);
+};
+</script>
+<script type="module">
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
 let client, channel, activeCode;
 async function connectRoom(code){
