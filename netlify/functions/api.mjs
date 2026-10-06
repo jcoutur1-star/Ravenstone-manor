@@ -9,8 +9,8 @@ const banks = {
   Motive: ["was due to inherit Cheryl's estate.", "had been locked in a defamation lawsuit with Cheryl.", "learned Cheryl changed her will last week.", "never forgave Cheryl for her memoir.", "believed Cheryl had stolen from them.", "had fallen out with Cheryl over a business deal."],
   Means: ["always kept a knife close at hand.", "had a gun in their luggage.", "knew where the manor kept its weapons.", "knew Cheryl hid a private knife beneath her bed.", "had studied toxicology and knew how poisons worked.", "knew where the household poisons were kept."],
   Opportunity: ["was seen outside Cheryl's bedroom shortly before she was found.", "appeared on camera in the hallway just before the murder.", "had fingerprints on a glass inside Cheryl's room.", "knew how to pick the old manor locks.", "had been expected to speak with Cheryl after dinner.", "was staying in the room next to Cheryl's."],
-  Counter: ["had been on better terms with Cheryl than ever.", "had a written apology from Cheryl.", "stood to benefit more from Cheryl being alive.", "had a broken leg and could not climb the stairs.", "fell asleep on the sitting-room couch.", "was seen in the library throughout the murder.", "arrived at the manor after the time of death."],
-  Red: ["Cheryl said she was going to ruin them.", "Cheryl called them her least favorite friend.", "Cheryl took them shooting last week.", "Cheryl tried to seduce them, but they refused.", "Cheryl increased her life insurance by fifty percent.", "they and Cheryl had become secretive lately.", "Cheryl owed them ten thousand dollars.", "Cheryl once said that if she died, blame another guest."]
+  Counter: ["had recently reconciled with Cheryl.", "had received a sincere apology from Cheryl.", "would have lost money if Cheryl died.", "had a broken leg and could not climb the stairs.", "was asleep in the sitting room around the time of death.", "was seen in the library throughout the murder.", "arrived at the manor after the estimated time of death."],
+  Red: ["had been overheard threatening Cheryl.", "was described by Cheryl as her least favorite guest.", "had gone shooting with Cheryl the week before.", "had rejected Cheryl's advances.", "had learned that Cheryl recently increased her life insurance.", "had become secretive with Cheryl lately.", "was owed ten thousand dollars by Cheryl.", "had heard Cheryl say, 'If I die, blame another guest.'"],
 };
 const fact = (category, name) => ({ id: uid(), category, text: `${name} ${pick(banks[category])}`, original: null });
 const db = () => {
@@ -82,12 +82,12 @@ async function createRoom(client, body) {
   const visibility = body.visibility === "public" ? "public" : "private";
   for (let attempt = 0; attempt < 5; attempt++) {
     const code = (mode === "practice" ? "P" : "") + makeToken().slice(0, mode === "practice" ? 4 : 5);
-    const room = { code, mode, visibility, status: "lobby", players: [], hostId: null, calls: [], postpones: [], votes: {}, deadline: null, case: null, updatedAt: Date.now() };
-    const player = { id: uid(), name: String(body.name || "Host").trim().slice(0, 20), token: makeToken(), bot: false, role: null, clues: [], matrix: {}, shares: [], inspected: false };
+    const room = { code, mode, visibility, status: "lobby", players: [], hostId: null, calls: [], postpones: [], votes: {}, messages: [], deadline: null, case: null, updatedAt: Date.now() };
+    const player = { id: uid(), name: String(body.name || "Host").trim().slice(0, 20), token: makeToken(), bot: false, role: null, clues: [], matrix: {}, shares: [], inspected: false, tamperUsed: false };
     room.hostId = player.id; room.players.push(player);
     if (mode === "practice") {
       room.practiceRole = body.practiceRole === "innocent" ? "innocent" : "murderer";
-      for (const name of ["Evelyn Vale", "Lord Ashford", "Mira Bell"]) room.players.push({ id: uid(), name, token: "", bot: true, role: null, clues: [], matrix: {}, shares: [], inspected: false });
+      for (const name of ["Evelyn Vale", "Lord Ashford", "Mira Bell"]) room.players.push({ id: uid(), name, token: "", bot: true, role: null, clues: [], matrix: {}, shares: [], inspected: false, tamperUsed: false });
     }
     const { error } = await client.from("ravenstone_rooms").insert({ code, state: room, version: 1, status: "lobby", visibility, player_count: 1 });
     if (!error) return json({ code, playerId: player.id, token: player.token, mode, host: true, players: cleanPlayers(room) });
@@ -101,7 +101,7 @@ async function joinRoom(client, row, room, body) {
   if (room.players.filter((p) => !p.bot).length >= 9) return json({ error: "This room is full." }, 409);
   const name = String(body.name || "Guest").trim().slice(0, 20);
   if (room.players.some((p) => p.name.toLowerCase() === name.toLowerCase())) return json({ error: "That name is already at the manor." }, 409);
-  const player = { id: uid(), name, token: makeToken(), bot: false, role: null, clues: [], matrix: {}, shares: [], inspected: false };
+  const player = { id: uid(), name, token: makeToken(), bot: false, role: null, clues: [], matrix: {}, shares: [], inspected: false, tamperUsed: false };
   room.players.push(player);
   const saved = await persist(client, row, room);
   if (!saved) return json({ error: "The room changed at the same time. Please try joining again." }, 409);
@@ -111,7 +111,8 @@ async function joinRoom(client, row, room, body) {
 function view(room, player) {
   return {
     code: room.code, status: room.status, mode: room.mode, visibility: room.visibility, players: cleanPlayers(room),
-    me: { id: player.id, name: player.name, role: player.role, clues: player.clues, inspected: player.inspected, shareCount: player.shares.length },
+    me: { id: player.id, name: player.name, role: player.role, clues: player.clues.map((c) => ({ id: c.id, category: c.category, text: c.text, sharedBy: c.sharedBy, inspection: c.inspection })), inspected: player.inspected, shareCount: player.shares.length, tamperUsed: Boolean(player.tamperUsed) },
+    messages: (room.messages || []).filter((m) => m.from === player.id || m.to === player.id).slice(-100),
     matrix: player.matrix || {}, secondsLeft: room.status === "investigation" ? Math.max(0, Math.ceil((room.deadline - Date.now()) / 1000)) : 600,
     calls: room.calls.length, postpones: room.postpones.length, votesSubmitted: Object.keys(room.votes).length,
     canStart: player.id === room.hostId && (room.mode === "practice" || room.players.filter((p) => !p.bot).length >= 3),
@@ -132,16 +133,53 @@ function makeCase(room) {
     while (own.length + extras.length < 4) extras.push(fact(p.id === killer.id ? "Red" : pick(["Counter", "Red", "Motive", "Means", "Opportunity"]), p.name));
     p.clues = [...own, ...extras].slice(0, 4);
   }
-  const framed = humans.find((p) => p.id !== killer.id) || bots.find((p) => p.id !== killer.id);
-  const first = killer.clues.find((c) => !["Counter", "Red"].includes(c.category));
-  if (first && framed) { first.original = first.text; first.text = `${framed.name} was seen outside Cheryl's bedroom shortly before she was found.`; room.case.altered.push({ from: first.original, to: first.text }); }
-  const second = framed?.clues.find((c) => !c.original && c.category !== "Counter");
-  if (second) { second.original = second.text; second.text = `${framed.name} appeared on camera in the hallway just before the murder.`; room.case.altered.push({ from: second.original, to: second.text }); }
-  if (room.mode === "practice") for (const bot of bots) room.players[0].clues.push({ ...pick(bot.clues), sharedBy: bot.name });
+  if (room.mode === "practice" && room.practiceRole === "innocent") {
+    const botKiller = bots.find((p) => p.id === killer.id);
+    const target = humans[0];
+    const clue = botKiller?.clues.find((c) => !["Counter", "Red"].includes(c.category)) || botKiller?.clues[0];
+    if (clue && target) {
+      const from = clue.text;
+      clue.category = "Opportunity";
+      clue.original = from;
+      clue.text = target.name + " was seen near Cheryl's bedroom around the time of the murder.";
+      room.case.altered.push({ from, to: clue.text });
+    }
+  }
+  if (room.mode === "practice") for (const bot of bots) {
+    const sample = bot.id === killer.id ? (bot.clues.find((c) => c.original) || pick(bot.clues)) : pick(bot.clues);
+    room.players[0].clues.push({ ...sample, sharedBy: bot.name });
+  }
   room.case.killerName = killer.name; room.status = "investigation"; room.deadline = Date.now() + 600000; room.calls = []; room.postpones = []; room.votes = {};
 }
 
 function act(room, player, action) {
+  if (action.type === "message") {
+    if (!["lobby", "investigation", "voting"].includes(room.status)) return { error: "Private messages are closed for this round." };
+    const target = room.players.find((p) => p.id === action.target && !p.bot && p.id !== player.id);
+    const text = String(action.text || "").trim().slice(0, 500);
+    if (!target) return { error: "Choose another human guest for your private message." };
+    if (!text) return { error: "Type a message before sending." };
+    room.messages ||= [];
+    room.messages.push({ id: uid(), from: player.id, to: target.id, text, createdAt: Date.now() });
+    if (room.messages.length > 300) room.messages.splice(0, room.messages.length - 300);
+    return {};
+  }
+  if (action.type === "tamper") {
+    if (room.status !== "investigation") return { error: "Evidence can only be altered during the investigation." };
+    if (player.role !== "murderer") return { error: "Only the murderer can alter evidence." };
+    if (player.tamperUsed) return { error: "You have already altered a clue this round." };
+    const clue = player.clues.find((c) => c.id === action.clueId && !c.sharedBy && !c.original);
+    const target = room.players.find((p) => p.id === action.target && p.id !== player.id);
+    if (!clue || !target) return { error: "Choose one of your clues and another guest to frame." };
+    const category = ["Means", "Motive", "Opportunity"].includes(clue.category) ? clue.category : pick(["Means", "Motive", "Opportunity"]);
+    const from = clue.text;
+    clue.original = from;
+    clue.category = category;
+    clue.text = target.name + " " + pick(banks[category]);
+    room.case.altered.push({ from, to: clue.text });
+    player.tamperUsed = true;
+    return {};
+  }
   if (action.type === "start") {
     if (player.id !== room.hostId || room.status !== "lobby" || (room.mode === "party" && room.players.filter((p) => !p.bot).length < 3)) return { error: "The host can begin once three guests have joined." };
     makeCase(room); return {};
