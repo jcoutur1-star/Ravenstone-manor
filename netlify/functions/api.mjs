@@ -83,12 +83,12 @@ async function createRoom(client, body) {
   const visibility = body.visibility === "public" ? "public" : "private";
   for (let attempt = 0; attempt < 5; attempt++) {
     const code = (mode === "practice" ? "P" : "") + makeToken().slice(0, mode === "practice" ? 4 : 5);
-    const room = { code, mode, visibility, status: "lobby", players: [], hostId: null, calls: [], postpones: [], votes: {}, messages: [], deadline: null, case: null, updatedAt: Date.now() };
-    const player = { id: uid(), name: String(body.name || "Host").trim().slice(0, 20), token: makeToken(), bot: false, role: null, clues: [], matrix: {}, shares: [], inspected: false, tamperUsed: false };
+    const room = { code, mode, visibility, status: "lobby", players: [], hostId: null, calls: [], postpones: [], votes: {}, messages: [], groupChat: [], deadline: null, case: null, updatedAt: Date.now() };
+    const player = { id: uid(), name: String(body.name || "Host").trim().slice(0, 20), token: makeToken(), bot: false, role: null, clues: [], matrix: {}, shares: [], inspected: false, tamperUsed: false, tamperSelfUsed: false, tamperFrameUsed: false, tamperedClues: [] };
     room.hostId = player.id; room.players.push(player);
     if (mode === "practice") {
       room.practiceRole = body.practiceRole === "innocent" ? "innocent" : "murderer";
-      for (const name of ["Evelyn Vale", "Lord Ashford", "Mira Bell"]) room.players.push({ id: uid(), name, token: "", bot: true, role: null, clues: [], matrix: {}, shares: [], inspected: false, tamperUsed: false });
+      for (const name of ["Evelyn Vale", "Lord Ashford", "Mira Bell"]) room.players.push({ id: uid(), name, token: "", bot: true, role: null, clues: [], matrix: {}, shares: [], inspected: false, tamperUsed: false, tamperSelfUsed: false, tamperFrameUsed: false, tamperedClues: [] });
     }
     const { error } = await client.from("ravenstone_rooms").insert({ code, state: room, version: 1, status: "lobby", visibility, player_count: room.players.length });
     if (!error) return json({ code, playerId: player.id, token: player.token, mode, host: true, players: cleanPlayers(room) });
@@ -102,7 +102,7 @@ async function joinRoom(client, row, room, body) {
   if (room.players.length >= 9) return json({ error: "This room is full." }, 409);
   const name = String(body.name || "Guest").trim().slice(0, 20);
   if (room.players.some((p) => p.name.toLowerCase() === name.toLowerCase())) return json({ error: "That name is already at the manor." }, 409);
-  const player = { id: uid(), name, token: makeToken(), bot: false, role: null, clues: [], matrix: {}, shares: [], inspected: false, tamperUsed: false };
+  const player = { id: uid(), name, token: makeToken(), bot: false, role: null, clues: [], matrix: {}, shares: [], inspected: false, tamperUsed: false, tamperSelfUsed: false, tamperFrameUsed: false, tamperedClues: [] };
   room.players.push(player);
   const saved = await persist(client, row, room);
   if (!saved) return json({ error: "The room changed at the same time. Please try joining again." }, 409);
@@ -112,8 +112,9 @@ async function joinRoom(client, row, room, body) {
 function view(room, player) {
   return {
     code: room.code, status: room.status, mode: room.mode, visibility: room.visibility, players: cleanPlayers(room),
-    me: { id: player.id, name: player.name, role: player.role, clues: player.clues.map((c) => ({ id: c.id, category: c.category, text: c.text, sharedBy: c.sharedBy, inspection: c.inspection })), trueEvidence: player.id === room.case?.killer ? room.case.key : [], inspected: player.inspected, shareCount: player.shares.length, tamperUsed: Boolean(player.tamperUsed) },
+    me: { id: player.id, name: player.name, role: player.role, clues: player.clues.map((c) => ({ id: c.id, category: c.category, text: c.text, sharedBy: c.sharedBy, source: c.source || (c.sharedBy ? "received" : "starting"), inspection: c.inspection })), startingClues: player.clues.filter((c) => !c.sharedBy).map((c) => ({ id: c.id, category: c.category, text: c.text, source: "starting", inspection: c.inspection })), receivedClues: player.clues.filter((c) => c.sharedBy).map((c) => ({ id: c.id, category: c.category, text: c.text, sharedBy: c.sharedBy, source: "received", inspection: c.inspection })), sharedClueIds: player.shares, trueEvidence: player.id === room.case?.killer ? room.case.key : [], inspected: player.inspected, shareCount: player.shares.length, tamperUsed: Boolean(player.tamperUsed), tamperSelfUsed: Boolean(player.tamperSelfUsed), tamperFrameUsed: Boolean(player.tamperFrameUsed), tamperedClues: player.tamperedClues || [] },
     messages: (room.messages || []).filter((m) => m.from === player.id || m.to === player.id).slice(-100),
+    groupChat: room.groupChat || [],
     matrix: player.matrix || {}, secondsLeft: room.status === "investigation" ? Math.max(0, Math.ceil((room.deadline - Date.now()) / 1000)) : 600,
     calls: room.calls.length, postpones: room.postpones.length, votesSubmitted: Object.keys(room.votes).length,
     canStart: player.id === room.hostId && (room.mode === "practice" || room.players.length >= 3),
@@ -139,7 +140,7 @@ function makeCase(room) {
     const available = evidencePool.filter((c) => !c.text.startsWith(p.name + " "));
     while (p.clues.length < 4 && available.length) {
       const index = Math.floor(Math.random() * available.length);
-      p.clues.push({ ...available.splice(index, 1)[0], id: uid() });
+      p.clues.push({ ...available.splice(index, 1)[0], id: uid(), source: "starting" });
     }
     p.clues = p.clues.slice(0, 4);
     if (p.bot) p.cluePool = evidencePool;
@@ -156,29 +157,35 @@ function makeCase(room) {
       room.case.altered.push({ from, to: clue.text });
     }
   }
+  room.groupChat ||= [];
   for (const bot of bots) {
-    const availableHumans = humans;
-    const used = new Set();
-    for (let i = 0; i < availableHumans.length; i++) {
-      const pool = bot.cluePool || bot.clues;
-      let candidates = pool;
-      if (bot.name === "Lady Winnie") candidates = pool.filter((c) => ["Red", "Motive"].includes(c.category));
-      if (bot.name === "Red Jackson") candidates = pool.filter((c) => c.category === "Counter");
-      if (bot.name === "Lord Ashford") candidates = pool.filter((c) => c.category === "Counter" && c.text.startsWith("Lord Ashford "));
-      if (bot.name === "Mira Bell") candidates = pool.filter((c) => ["Means", "Motive", "Opportunity"].includes(c.category));
-      if (!candidates.length) candidates = pool;
-      const fresh = candidates.filter((c) => !used.has(c.id));
-      const altered = bot.id === killer.id && bot.clues.find((c) => c.original);
-      const sample = altered && i === 0 ? altered : bot.name === "Evelyn Vale" ? pick(pool) : pick(fresh.length ? fresh : candidates);
-      used.add(sample.id);
-      availableHumans[i].clues.push({ ...sample, id: uid(), sharedBy: bot.name });
-    }
+    const pool = bot.cluePool || bot.clues;
+    let candidates = pool;
+    if (bot.name === "Lady Winnie") candidates = pool.filter((c) => ["Red", "Motive"].includes(c.category));
+    if (bot.name === "Red Jackson") candidates = pool.filter((c) => c.category === "Counter");
+    if (bot.name === "Lord Ashford") candidates = pool.filter((c) => c.category === "Counter" && c.text.startsWith("Lord Ashford "));
+    if (bot.name === "Mira Bell") candidates = pool.filter((c) => ["Means", "Motive", "Opportunity"].includes(c.category));
+    if (!candidates.length) candidates = pool;
+    const altered = bot.id === killer.id && bot.clues.find((c) => c.original);
+    const sample = altered || (bot.name === "Evelyn Vale" ? pick(pool) : pick(candidates));
+    const shared = { ...sample, id: uid(), sharedBy: bot.name, source: "received" };
+    for (const human of humans) if (human.id !== bot.id) human.clues.push({ ...shared });
+    room.groupChat.push({ id: uid(), kind: "clue", from: bot.id, fromName: bot.name, clue: { category: sample.category, text: sample.text }, createdAt: Date.now() });
   }
   room.botNominations = {};
   room.case.killerName = killer.name; room.status = "investigation"; room.deadline = Date.now() + 600000; room.calls = []; room.postpones = []; room.votes = {};
 }
 
 function act(room, player, action) {
+  if (action.type === "groupMessage") {
+    if (!["lobby", "investigation", "voting"].includes(room.status)) return { error: "Group chat is closed for this round." };
+    const text = String(action.text || "").trim().slice(0, 500);
+    if (!text) return { error: "Write a message first." };
+    room.groupChat ||= [];
+    room.groupChat.push({ id: uid(), kind: "message", from: player.id, fromName: player.name, text, createdAt: Date.now() });
+    if (room.groupChat.length > 300) room.groupChat.splice(0, room.groupChat.length - 300);
+    return {};
+  }
   if (action.type === "message") {
     if (!["lobby", "investigation", "voting"].includes(room.status)) return { error: "Private messages are closed for this round." };
     const target = room.players.find((p) => p.id === action.target && p.id !== player.id);
@@ -201,17 +208,24 @@ function act(room, player, action) {
   if (action.type === "tamper") {
     if (room.status !== "investigation") return { error: "Evidence can only be altered during the investigation." };
     if (player.role !== "murderer") return { error: "Only the murderer can alter evidence." };
-    if (player.tamperUsed) return { error: "You have already altered a clue this round." };
-    const clue = player.clues.find((c) => c.id === action.clueId && !c.sharedBy && !c.original);
-    const target = room.players.find((p) => p.id === action.target && p.id !== player.id);
-    if (!clue || !target) return { error: "Choose one of your clues and another guest to frame." };
-    const category = ["Means", "Motive", "Opportunity"].includes(clue.category) ? clue.category : pick(["Means", "Motive", "Opportunity"]);
+    player.tamperedClues ||= [];
+    const mode = action.mode === "self" ? "self" : "frame";
+    if (mode === "self" && player.tamperSelfUsed) return { error: "You have already altered a clue to clear yourself." };
+    if (mode === "frame" && player.tamperFrameUsed) return { error: "You have already altered a clue to frame another guest." };
+    const clue = player.clues.find((c) => c.id === action.clueId && !c.sharedBy && (c.source || "starting") === "starting" && !player.tamperedClues.includes(c.id));
+    const target = mode === "self" ? player : room.players.find((p) => p.id === action.target && p.id !== player.id);
+    if (!clue || !target) return { error: "Choose an unused starting clue and the guest to frame." };
+    const category = mode === "self" ? "Counter" : (["Means", "Motive", "Opportunity"].includes(clue.category) ? clue.category : pick(["Means", "Motive", "Opportunity"]));
     const from = clue.text;
     clue.original = from;
     clue.category = category;
     clue.text = target.name + " " + pick(banks[category]);
-    room.case.altered.push({ from, to: clue.text });
-    player.tamperUsed = true;
+    clue.alteredFor = mode;
+    room.case.altered.push({ from, to: clue.text, kind: mode });
+    player.tamperedClues.push(clue.id);
+    if (mode === "self") player.tamperSelfUsed = true;
+    else player.tamperFrameUsed = true;
+    player.tamperUsed = player.tamperSelfUsed && player.tamperFrameUsed;
     return {};
   }
   if (action.type === "start") {
@@ -224,15 +238,19 @@ function act(room, player, action) {
     const name = String(action.name || "");
     if (!botNames.includes(name)) return { error: "Choose one of the manor's available guests." };
     if (room.players.some((p) => p.name === name)) return { error: `${name} is already in this room.` };
-    room.players.push({ id: uid(), name, token: "", bot: true, role: null, clues: [], matrix: {}, shares: [], inspected: false, tamperUsed: false });
+    room.players.push({ id: uid(), name, token: "", bot: true, role: null, clues: [], matrix: {}, shares: [], inspected: false, tamperUsed: false, tamperSelfUsed: false, tamperFrameUsed: false, tamperedClues: [] });
     return {};
   }
   if (action.type === "matrix") { player.matrix[action.suspect] ||= {}; player.matrix[action.suspect][action.category] = action.value; return {}; }
   if (action.type === "share") {
-    if (player.shares.length >= 2) return { error: "You have used both direct shares." };
-    const target = room.players.find((p) => p.id === action.target && !p.bot), clue = player.clues.find((c) => c.id === action.clueId);
-    if (!target || !clue || target.id === player.id) return { error: "Choose a guest and one of your clues." };
-    player.shares.push(clue.id); target.clues.push({ ...clue, sharedBy: player.name }); return {};
+    if (player.shares.length >= 2) return { error: "You have used both group clue shares." };
+    const clue = player.clues.find((c) => c.id === action.clueId);
+    if (!clue || player.shares.includes(clue.id)) return { error: "Choose an evidence card you have not shared yet." };
+    player.shares.push(clue.id);
+    room.groupChat ||= [];
+    room.groupChat.push({ id: uid(), kind: "clue", from: player.id, fromName: player.name, clue: { id: clue.id, category: clue.category, text: clue.text }, createdAt: Date.now() });
+    for (const recipient of room.players) if (recipient.id !== player.id) recipient.clues.push({ ...clue, sharedBy: player.name, source: "received", inspection: undefined });
+    return {};
   }
   if (action.type === "inspect") {
     if (player.inspected) return { error: "Your inspection has already been used." };
